@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+
+# 1. Dosyayı okuyoruz (Header 4. indekste yani 5. satırda başladığı için header=4 yapıyoruz)
+dosya_yolu = 'tüik_veri.xls'
+
+try:
+    df = pd.read_excel(dosya_yolu, header=4)
+except Exception as e:
+    # Eğer Excel uzantısı xlsx olarak okunmak istenirse
+    df = pd.read_excel(dosya_yolu, engine='openpyxl', header=4)
+
+# 2. Gereksiz veya tamamen boş satırları/sütunları temizleyelim
+df = df.dropna(how='all')
+
+# İlk sütunun adını 'Harcama_Kategorisi' yapalım
+df.rename(columns={df.columns[0]: 'Harcama_Kategorisi'}, inplace=True)
+
+# Sadece kategorilerin olduğu satırları alalım
+df = df[df['Harcama_Kategorisi'].notnull()]
+
+# 3. Yılları içeren sütunları tespit edelim (2009'dan 2024'e kadar olan sayısal sütunlar)
+yil_sutunlari = [col for col in df.columns if str(col).isdigit() or (isinstance(col, int) and 2000 <= col <= 2030)]
+
+# 4. MELT (UNPIVOT) İŞLEMİ: Yıl sütunlarını alt alta satırlara döküyoruz
+df_melted = pd.melt(
+    df, 
+    id_vars=['Harcama_Kategorisi'], 
+    value_vars=yil_sutunlari,
+    var_name='Yil', 
+    value_name='Endeks_Degeri'
+)
+
+# 5. Temizlik: Kategorilerdeki Türkçe katsayı numaralarını ve boşlukları temizleme
+df_melted['Harcama_Kategorisi'] = df_melted['Harcama_Kategorisi'].astype(str).str.replace(r'^\d+\s*', '', regex=True).str.strip()
+
+# Sayısal değere dönüştürme
+df_melted['Endeks_Degeri'] = df_melted['Endeks_Degeri'].astype(str).str.replace(',', '.').astype(float)
+
+# Verinin ilk 10 satırına bakalım
+print("--- TEBRİKLER! VERİ BORU HATTI BAŞARIYLA ÇALIŞTI ---")
+print(f"Toplam Oluşan Satır Sayısı: {len(df_melted)}")
+display(df_melted.head(10))
+
+
+
+import sqlite3
+
+# 1. Colab içinde hafızada sanal bir SQLite veritabanı bağlantısı oluşturuyoruz
+conn = sqlite3.connect('tuik_analiz.db')
+
+# 2. Temizlediğimiz Pandas DataFrame'ini 'tuketim_harcamalari' adıyla SQL tablosuna dönüştürüyoruz
+df_melted.to_sql('tuketim_harcamalari', conn, if_exists='replace', index=False)
+
+print("✅ Veri başarıyla SQLite veritabanına 'tuketim_harcamalari' tablosu olarak yüklendi!")
+
+
+
+
+# SQL Sorgusu Hazırlıyoruz
+sql_sorgusu = """
+SELECT 
+    Harcama_Kategorisi, 
+    Yil, 
+    Endeks_Degeri
+FROM 
+    tuketim_harcamalari
+WHERE 
+    Yil = '2024'
+ORDER BY 
+    Endeks_Degeri DESC;
+"""
+
+# SQL Sorgusunu Çalıştırıp Sonucu Ekranımıza Getiriyoruz
+sonuc_df = pd.read_sql_query(sql_sorgusu, conn)
+display(sonuc_df)
+
+
+
+
+sql_2024 = """
+SELECT 
+    Harcama_Kategorisi, 
+    Yil, 
+    ROUND(Endeks_Degeri, 2) AS Endeks_2024
+FROM 
+    tuketim_harcamalari
+WHERE 
+    Yil = '2024' 
+    AND Endeks_Degeri IS NOT NULL
+ORDER BY 
+    Endeks_Degeri DESC;
+"""
+sql_ozet = """
+SELECT 
+    Harcama_Kategorisi,
+    ROUND(AVG(Endeks_Degeri), 2) AS Ortalama_Endeks,
+    ROUND(MAX(Endeks_Degeri), 2) AS En_Yuksek_Endeks,
+    ROUND(MIN(Endeks_Degeri), 2) AS En_Dusuk_Endeks
+FROM 
+    tuketim_harcamalari
+WHERE 
+    Endeks_Degeri IS NOT NULL
+GROUP BY 
+    Harcama_Kategorisi
+ORDER BY 
+    Ortalama_Endeks DESC;
+"""
+
+print("--- 1. 2024 Yılı Sıralaması (Temizlenmiş) ---")
+display(pd.read_sql_query(sql_2024, conn))
+
+print("\n--- 2. Kategori Bazlı Genel Özet (GROUP BY & AVG) ---")
+display(pd.read_sql_query(sql_ozet, conn))
+
+
+# Temiz veriyi SQL'den çekip CSV olarak kaydediyoruz
+df_final = pd.read_sql_query("""
+    SELECT Harcama_Kategorisi, Yil, Endeks_Degeri 
+    FROM tuketim_harcamalari 
+    WHERE Endeks_Degeri IS NOT NULL
+""", conn)
+
+# Bilgisayarına inmesi için CSV'ye dönüştürüyoruz
+df_final.to_csv('tuik_tuketim_temiz_veri.csv', index=False, encoding='utf-8-sig')
+
+print("✅ 'tuik_tuketim_temiz_veri.csv' dosyası başarıyla oluşturuldu!")
